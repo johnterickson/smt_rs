@@ -1,8 +1,14 @@
-use std::{collections::{HashMap, HashSet, VecDeque}, fmt, mem, str::Split};
+// inspired by https://siddhartha-gadgil.github.io/automating-mathematics/posts/sat-solving/
+
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    fmt, mem,
+    str::Split,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Literal {
-    variable: char,
+    variable: u16,
     inverted: bool,
 }
 
@@ -11,7 +17,11 @@ impl fmt::Display for Literal {
         if self.inverted {
             write!(f, "~")?;
         }
-        write!(f, "{}", self.variable)
+        if self.variable < 26 {
+            write!(f, "{}", (self.variable as u8 + 'A' as u8) as char)
+        } else {
+            write!(f, "@{}", self.variable)
+        }
     }
 }
 
@@ -68,39 +78,29 @@ impl Expression {
                 "==>" => {
                     let right = stack.pop_back().unwrap();
                     let left = stack.pop_back().unwrap();
-                    stack.push_back(Expression::Implies(
-                        Box::new(left),
-                        Box::new(right)));
-                    },
+                    stack.push_back(Expression::Implies(Box::new(left), Box::new(right)));
+                }
                 "<==>" => {
                     let right = stack.pop_back().unwrap();
                     let left = stack.pop_back().unwrap();
-                    stack.push_back(Expression::Equivalent(
-                        Box::new(left),
-                        Box::new(right)));
-                    },
+                    stack.push_back(Expression::Equivalent(Box::new(left), Box::new(right)));
+                }
                 "&" => {
                     let right = stack.pop_back().unwrap();
                     let left = stack.pop_back().unwrap();
-                    stack.push_back(Expression::And(vec![
-                        left,
-                        right
-                    ]));
+                    stack.push_back(Expression::And(vec![left, right]));
                 }
                 "|" => {
                     let right = stack.pop_back().unwrap();
                     let left = stack.pop_back().unwrap();
-                    stack.push_back(Expression::Or(vec![
-                        left,
-                        right
-                    ]));
-                },
+                    stack.push_back(Expression::Or(vec![left, right]));
+                }
                 s if s.len() == 1 && s.chars().next().unwrap().is_ascii_alphabetic() => {
                     stack.push_back(Expression::Literal(Literal {
-                        variable: s.chars().next().unwrap(),
-                        inverted: false
+                        variable: s.chars().next().unwrap() as u16 - ('A' as u16),
+                        inverted: false,
                     }));
-                },
+                }
                 s => panic!("what is '{}'", s),
             }
         }
@@ -113,7 +113,7 @@ impl Expression {
         Expression::parse_inner(&mut tokens)
     }
 
-    fn eval(&self, values: &HashMap<char, bool>) -> bool {
+    fn eval(&self, values: &HashMap<u16, bool>) -> bool {
         match self {
             Expression::Constant(c) => *c,
             Expression::Literal(l) => values[&l.variable] ^ l.inverted,
@@ -439,20 +439,13 @@ impl Expression {
 
     fn to_cnf(&self) -> Cnf {
         match self {
-            Expression::Or(_) => {
-                Cnf(vec![self.to_clause()])
-            }
-            Expression::And(clauses) => {
-                Cnf(clauses
-                    .iter()
-                    .map(|c| c.to_clause())
-                    .collect())
-            }
-            _ => panic!("Expected And!"),
+            Expression::Or(_) => Cnf([self.to_clause()].into_iter().cloned().collect()),
+            Expression::And(clauses) => Cnf(clauses.iter().map(|c| c.to_clause()).collect()),
+            e => panic!("Expected And, but found: {:?}", e),
         }
     }
 
-    fn find_vars(&self) -> HashSet<char> {
+    fn find_vars(&self) -> HashSet<u16> {
         let mut chars = HashSet::new();
 
         self.recurse(&mut |e| {
@@ -467,8 +460,8 @@ impl Expression {
     fn assert_equivalent_helper(
         &self,
         other: &Expression,
-        vars_to_set: &mut HashSet<char>,
-        values: &mut HashMap<char, bool>,
+        vars_to_set: &mut HashSet<u16>,
+        values: &mut HashMap<u16, bool>,
     ) {
         if vars_to_set.len() == 0 {
             let self_result = self.eval(values);
@@ -506,11 +499,15 @@ impl Expression {
 struct Clause(HashSet<Literal>);
 impl Clause {
     fn simplify(&mut self) {
-        let positives: HashSet<_>= self.0.iter()
+        let positives: HashSet<_> = self
+            .0
+            .iter()
             .filter(|l| !l.inverted)
             .map(|l| l.variable)
             .collect();
-        let negatives = self.0.iter()
+        let negatives = self
+            .0
+            .iter()
             .filter(|l| l.inverted)
             .map(|l| l.variable)
             .collect();
@@ -518,9 +515,8 @@ impl Clause {
             self.0.clear();
         }
     }
-    
 
-    fn eval(&self, values: &HashMap<char, bool>) -> bool {
+    fn eval(&self, values: &HashMap<u16, bool>) -> bool {
         self.0.iter().any(|l| l.inverted ^ values[&l.variable])
     }
 }
@@ -534,20 +530,45 @@ impl fmt::Display for Clause {
             }
             Ok(())
         } else {
-            write!(f,"{{}}")
+            write!(f, "{{}}")
+        }
+    }
+}
+impl std::hash::Hash for Clause {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        for l in &self.0 {
+            l.hash(state);
         }
     }
 }
 
 #[derive(Debug)]
-struct Cnf(Vec<Clause>);
+struct Cnf(HashSet<Clause>);
 impl Cnf {
+    fn is_solved(&self) -> bool {
+        self.0.len() == 0
+    }
     fn solve(&mut self) {
-        for c in &mut self.0 {
-            c.simplify();
-        }
+        take_mut::take(&mut self.0, |clauses| {
+            clauses
+                .into_iter()
+                .map(|mut c| {
+                    c.simplify();
+                    c
+                })
+                .filter(|c| c.0.len() > 0)
+                .collect()
+        });
 
-        self.0 = self.0.iter().filter(|c| c.0.len() > 0).cloned().collect();
+        // TODO resolution
+        // from (A | B | C | D) & (~A | E | F | G)
+        // create (B|C|D|E|F|G)
+        // note: http://www.cs.toronto.edu/~fbacchus/Presentations/SATandCSP-4up.pdf
+
+
+        // TODO depth-first search
+        // https://www.cs.utexas.edu/users/moore/acl2/seminar/2008.12.10-swords/sat.pdf
+
     }
 }
 
@@ -561,15 +582,53 @@ impl fmt::Display for Cnf {
             }
             Ok(())
         } else {
-            write!(f,"{{}}")
+            write!(f, "{{}}")
         }
     }
 }
 
 fn main() {
-    let mut expression = Expression::parse(
-        "B A & A ==>"
-    );
+    let N = 2;
+    fn cell(row: u16, col: u16) -> u16 {
+        100 + (row * 10) + col
+    }
+
+    let mut expressions = Vec::new();
+
+    // exactly 1 queen per row
+    for row in 0..N {
+        let mut options = Vec::new();
+        for q_col in 0..N {
+            let mut option = Vec::new();
+            for col in 0..N {
+                option.push(Expression::Literal(Literal {
+                    variable: cell(row, col),
+                    inverted: q_col != col,
+                }))
+            }
+            options.push(Expression::And(option));
+        }
+        expressions.push(Expression::Or(options));
+    }
+
+    // exactly 1 queen per column
+    for col in 0..N {
+        let mut options = Vec::new();
+        for q_row in 0..N {
+            let mut option = Vec::new();
+            for row in 0..N {
+                option.push(Expression::Literal(Literal {
+                    variable: cell(row, col),
+                    inverted: q_row != row,
+                }))
+            }
+            options.push(Expression::And(option));
+        }
+        expressions.push(Expression::Or(options));
+    }
+    // TODO diagonals
+
+    let mut expression = Expression::And(expressions);
 
     println!("{}", &expression);
     expression.simplify();
@@ -584,7 +643,7 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn test(before: Expression, after: Expression, expected: Expression) {
+    fn test(before: &Expression, after:& Expression, expected: &Expression) {
         println!(" Before: {}", &before);
         println!("   After: {}", &after);
         before.assert_equivalent(&after);
@@ -600,7 +659,15 @@ mod tests {
         after.sort();
         let mut expected = Expression::parse("B A |");
         expected.sort();
-        test(before, after, expected);
+        test(&before, &after, &expected);
+
+        let mut proof = Expression::Equivalent(
+            Box::new(before),
+            Box::new(after));
+        proof.simplify();
+        let mut proof_cnf = proof.to_cnf();
+        proof_cnf.solve();
+        assert!(proof_cnf.is_solved());
     }
 
     #[test]
@@ -609,7 +676,7 @@ mod tests {
         let mut after = before.clone();
         after.simplify_implies();
         let expected = Expression::parse("A ! B |");
-        test(before, after, expected);
+        test(&before, &after, &expected);
     }
 
     #[test]
@@ -618,6 +685,6 @@ mod tests {
         let mut after = before.clone();
         after.simplify_equivalence();
         let expected = Expression::parse("A ! B ! & A B & |");
-        test(before, after, expected);
+        test(&before, &after, &expected);
     }
 }
